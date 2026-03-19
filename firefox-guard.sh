@@ -8,9 +8,14 @@
 MINUTES=$1
 COOLDOWN_FILE="/home/$USER/.firefox_cooldown"
 COOLDOWN_DURATION_FILE="/home/$USER/.firefox_cooldown_duration"
+GUARD_KILL_FILE="/home/$USER/.firefox_guard_kill"
 WORDLIST="$HOME/.config/firefox-guard/wordlist.txt"
 PATTERNS="$HOME/.config/firefox-guard/patterns.txt"
 PROMPT_FILE="$HOME/.config/firefox-guard/prompt.txt"
+LOG_FILE="$HOME/.config/firefox-guard/activity.log"
+
+# Redirect stderr to stdout by default
+exec 2>&1
 
 # ============================================================
 # PREVENT MULTIPLE INSTANCES
@@ -74,6 +79,8 @@ export MOZ_APP_LAUNCHER=/usr/bin/firefox
 /usr/lib/firefox/firefox "${@:2}" &
 FF_PID=$!
 
+echo "$(date) | SESSION STARTED | $MINUTES minutes" | tee -a "$LOG_FILE"
+
 # ============================================================
 # SESSION TIMER
 # ============================================================
@@ -101,15 +108,21 @@ fi
 # GUARD — URL MONITOR + AI FILTER
 # ============================================================
 (
-    sleep 3  # give Firefox time to load
+    sleep 3
+    LAST_QUERY=""
     while kill -0 $FF_PID 2>/dev/null; do
         sleep 1
 
+        # Only scan if Firefox is the active window
+        ACTIVE_PID=$(xdotool getactivewindow getwindowpid 2>/dev/null)
+        if [ "$ACTIVE_PID" != "$FF_PID" ]; then
+            continue
+        fi
+
         # Read current Firefox window title
         TITLE=$(xdotool getactivewindow getwindowname 2>/dev/null)
-        URL=$(echo "$TITLE" | grep -oP '(?<=— Mozilla Firefox).*' | xargs)
 
-        # Extract search query from title if it's a Google search
+        # Extract search query from title
         QUERY=$(echo "$TITLE" | sed 's/ - Google Search.*//' | sed 's/ — Mozilla Firefox.*//' | xargs)
 
         if [ -z "$QUERY" ] || [ "$QUERY" = "$LAST_QUERY" ]; then
@@ -118,14 +131,20 @@ fi
 
         LAST_QUERY="$QUERY"
 
+        # Log query
+        echo "$(date) | TITLE: $TITLE | QUERY: $QUERY" | tee -a "$LOG_FILE"
+
         # Layer 0 — Wordlist check
         if [ -f "$WORDLIST" ]; then
             while IFS= read -r word; do
+                if [ -z "$word" ]; then continue; fi
                 if echo "$QUERY" | grep -qi "$word"; then
-                    zenity --error --text="Flagged search detected. 20 minute cooldown activated." --title="Firefox Guard" &
+                    echo "$(date) | FLAGGED WORD: $word | QUERY: $QUERY" | tee -a "$LOG_FILE"
+                    zenity --error --text="Flagged word detected: '$word'. 20 minute cooldown activated." --title="Firefox Guard" &
                     kill $FF_PID
                     echo "$(date +%s)" > "$COOLDOWN_FILE"
                     echo 1200 > "$COOLDOWN_DURATION_FILE"
+                    touch "$GUARD_KILL_FILE"
                     exit 0
                 fi
             done < "$WORDLIST"
@@ -134,33 +153,44 @@ fi
         # Layer 1 — URL pattern check
         if [ -f "$PATTERNS" ]; then
             while IFS= read -r pattern; do
+                if [ -z "$pattern" ]; then continue; fi
                 if echo "$TITLE" | grep -qi "$pattern"; then
-                    zenity --error --text="Flagged URL pattern detected. 20 minute cooldown activated." --title="Firefox Guard" &
+                    echo "$(date) | FLAGGED PATTERN: $pattern | TITLE: $TITLE" | tee -a "$LOG_FILE"
+                    zenity --error --text="Flagged URL pattern detected: '$pattern'. 20 minute cooldown activated." --title="Firefox Guard" &
                     kill $FF_PID
                     echo "$(date +%s)" > "$COOLDOWN_FILE"
                     echo 1200 > "$COOLDOWN_DURATION_FILE"
+                    touch "$GUARD_KILL_FILE"
                     exit 0
                 fi
             done < "$PATTERNS"
         fi
 
-        # Layer 2 — Ollama AI check
-        PROMPT=$(cat "$PROMPT_FILE" 2>/dev/null)
-        RESPONSE=$(curl -s http://localhost:11434/api/chat -d "{
-            \"model\": \"mistral\",
-            \"messages\": [
-                {\"role\": \"system\", \"content\": $(echo "$PROMPT" | jq -Rs .)},
-                {\"role\": \"user\", \"content\": $(echo "Evaluate this search query: $QUERY" | jq -Rs .)}
-            ],
-            \"stream\": false
-        }" | jq -r '.message.content' 2>/dev/null)
+        # Layer 2 — Ollama AI check (only if Ollama is running)
+        if curl -s http://localhost:11434 > /dev/null 2>&1; then
+            PROMPT=$(cat "$PROMPT_FILE" 2>/dev/null)
+            RESPONSE=$(curl -s http://localhost:11434/api/chat -d "{
+                \"model\": \"mistral\",
+                \"messages\": [
+                    {\"role\": \"system\", \"content\": $(echo "$PROMPT" | jq -Rs .)},
+                    {\"role\": \"user\", \"content\": $(echo "Evaluate this search query: $QUERY" | jq -Rs .)}
+                ],
+                \"stream\": false
+            }" | jq -r '.message.content' 2>/dev/null)
 
-        if echo "$RESPONSE" | grep -qi "^YES"; then
-            zenity --error --text="AI flagged your search. 20 minute cooldown activated." --title="Firefox Guard" &
-            kill $FF_PID
-            echo "$(date +%s)" > "$COOLDOWN_FILE"
-            echo 1200 > "$COOLDOWN_DURATION_FILE"
-            exit 0
+            echo "$(date) | AI RESPONSE: $RESPONSE" | tee -a "$LOG_FILE"
+
+            if echo "$RESPONSE" | grep -qi "^YES"; then
+                echo "$(date) | AI FLAGGED: $QUERY" | tee -a "$LOG_FILE"
+                zenity --error --text="AI flagged your search: '$QUERY'. 20 minute cooldown activated." --title="Firefox Guard" &
+                kill $FF_PID
+                echo "$(date +%s)" > "$COOLDOWN_FILE"
+                echo 1200 > "$COOLDOWN_DURATION_FILE"
+                touch "$GUARD_KILL_FILE"
+                exit 0
+            fi
+        else
+            echo "$(date) | Ollama not running — skipping AI check" | tee -a "$LOG_FILE"
         fi
 
     done
@@ -171,6 +201,12 @@ fi
 # ============================================================
 wait $FF_PID
 
-# Apply cooldown on manual close
-echo "$(date +%s)" > "$COOLDOWN_FILE"
-echo 300 > "$COOLDOWN_DURATION_FILE"
+echo "$(date) | SESSION ENDED" | tee -a "$LOG_FILE"
+
+# Apply cooldown on manual close only if guard did not trigger
+if [ -f "$GUARD_KILL_FILE" ]; then
+    rm "$GUARD_KILL_FILE"
+else
+    echo "$(date +%s)" > "$COOLDOWN_FILE"
+    echo 300 > "$COOLDOWN_DURATION_FILE"
+fi
