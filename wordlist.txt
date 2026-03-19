@@ -1,0 +1,19 @@
+# Firefox Guard — Trigger Wordlist
+# Add one word or phrase per line
+# Be honest about your specific weak points
+# The more specific, the more effective
+# This file is a public template — add your personal words to:
+# ~/.config/firefox-guard/wordlist.txt
+
+porn
+hentai
+nsfw
+xxx
+nude
+nudity
+naked
+erotic
+lewd
+rule34
+ahegao
+onlyfans

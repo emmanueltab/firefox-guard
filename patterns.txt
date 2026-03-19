@@ -1,3 +1,24 @@
-tbm=isch
-safesearch=off
-...
+# Firefox Guard — URL Pattern Blocklist
+# Add one URL pattern per line
+# Any URL containing these strings will trigger an instant kill
+# This file is a public template — add your personal patterns to:
+# ~/.config/firefox-guard/patterns.txt
+
+rule34
+gelbooru
+danbooru
+nhentai
+hentaifox
+sankakucomplex
+4chan
+8chan
+pornhub
+xvideos
+xhamster
+onlyfans
+fansly
+civitai
+novelai
+crushon
+janitorai
+spicychat
