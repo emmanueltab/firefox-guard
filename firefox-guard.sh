@@ -76,7 +76,7 @@ fi
 # LAUNCH FIREFOX
 # ============================================================
 export MOZ_APP_LAUNCHER=/usr/bin/firefox
-/usr/lib/firefox/firefox "${@:2}" &
+/usr/lib/firefox/firefox "${@:2}" 2>/dev/null &
 FF_PID=$!
 
 echo "$(date) | SESSION STARTED | $MINUTES minutes" | tee -a "$LOG_FILE"
@@ -123,11 +123,19 @@ fi
         TITLE=$(xdotool getactivewindow getwindowname 2>/dev/null)
 
         # Extract search query from title
-        QUERY=$(echo "$TITLE" | sed 's/ - Google Search.*//' | sed 's/ — Mozilla Firefox.*//' | xargs)
+        QUERY=$(echo "$TITLE" | sed 's/ - Google Search.*//' | sed 's/ — Mozilla Firefox.*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
 
         if [ -z "$QUERY" ] || [ "$QUERY" = "$LAST_QUERY" ]; then
             continue
         fi
+
+        # Skip generic Firefox titles
+        case "$QUERY" in
+            "Mozilla Firefox"|"Restore Session"|"New Tab")
+                continue
+                ;;
+        esac
 
         LAST_QUERY="$QUERY"
 
@@ -166,21 +174,27 @@ fi
             done < "$PATTERNS"
         fi
 
-        # Layer 2 — Ollama AI check (only if Ollama is running)
-        if curl -s http://localhost:11434 > /dev/null 2>&1; then
+        # Layer 2 — Groq AI check
+        GROQ_KEY=$(cat "$HOME/.config/firefox-guard/groq_api_key.txt" 2>/dev/null)
+        if [ -n "$GROQ_KEY" ]; then
             PROMPT=$(cat "$PROMPT_FILE" 2>/dev/null)
-            RESPONSE=$(curl -s http://localhost:11434/api/chat -d "{
-                \"model\": \"mistral\",
-                \"messages\": [
-                    {\"role\": \"system\", \"content\": $(echo "$PROMPT" | jq -Rs .)},
-                    {\"role\": \"user\", \"content\": $(echo "Evaluate this search query: $QUERY" | jq -Rs .)}
-                ],
-                \"stream\": false
-            }" | jq -r '.message.content' 2>/dev/null)
-
+            RESPONSE=$(curl -s -X POST https://api.groq.com/openai/v1/chat/completions \
+                -H "Authorization: Bearer $GROQ_KEY" \
+                -H "Content-Type: application/json" \
+                -d "{
+                    \"model\": \"compound-beta-mini\",
+                    \"messages\": [
+                        {\"role\": \"system\", \"content\": $(echo "$PROMPT" | jq -Rs .)},
+                        {\"role\": \"user\", \"content\": $(echo "Evaluate this search query: $QUERY" | jq -Rs .)}
+                    ]
+                }" | jq -r '.choices[0].message.content' 2>/dev/null)
+            # Abort if Firefox already closed
+            if ! kill -0 $FF_PID 2>/dev/null; then
+                exit 0
+            fi
             echo "$(date) | AI RESPONSE: $RESPONSE" | tee -a "$LOG_FILE"
 
-            if echo "$RESPONSE" | grep -qi "^YES"; then
+            if echo "$RESPONSE" | grep -qi "^\s*YES"; then
                 echo "$(date) | AI FLAGGED: $QUERY" | tee -a "$LOG_FILE"
                 zenity --error --text="AI flagged your search: '$QUERY'. 20 minute cooldown activated." --title="Firefox Guard" &
                 kill $FF_PID
@@ -190,7 +204,7 @@ fi
                 exit 0
             fi
         else
-            echo "$(date) | Ollama not running — skipping AI check" | tee -a "$LOG_FILE"
+            echo "$(date) | Groq API key not found — skipping AI check" | tee -a "$LOG_FILE"
         fi
 
     done
