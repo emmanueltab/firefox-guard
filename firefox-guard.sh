@@ -16,6 +16,7 @@ LOG_FILE="$HOME/.config/firefox-guard/activity.log"
 
 # Redirect stderr to stdout by default
 exec 2>&1
+
 # ============================================================
 # PREVENT MULTIPLE INSTANCES
 # ============================================================
@@ -129,14 +130,13 @@ fi
         # Extract search query from title
         QUERY=$(echo "$TITLE" | sed 's/ - Google Search.*//' | sed 's/ — Mozilla Firefox.*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-
         if [ -z "$QUERY" ] || [ "$QUERY" = "$LAST_QUERY" ]; then
             continue
         fi
 
         # Skip generic Firefox titles
         case "$QUERY" in
-            "Mozilla Firefox"|"Restore Session"|"New Tab")
+            "Mozilla Firefox"|"Restore Session"|"New Tab"|"Problem loading page")
                 continue
                 ;;
         esac
@@ -204,13 +204,23 @@ fi
                         {\"role\": \"user\", \"content\": $(echo "Evaluate this search query: $QUERY" | jq -Rs .)}
                     ]
                 }" | jq -r '.choices[0].message.content' 2>/dev/null)
+
             # Abort if Firefox already closed
             if ! kill -0 $FF_PID 2>/dev/null; then
                 exit 0
             fi
+
             echo "$(date) | AI RESPONSE: $RESPONSE" | tee -a "$LOG_FILE"
 
-            if echo "$RESPONSE" | grep -qi "^\s*YES"; then
+            if [ -z "$RESPONSE" ] || [ "$RESPONSE" = "null" ]; then
+                echo "$(date) | AI UNAVAILABLE: closing session" | tee -a "$LOG_FILE"
+                zenity --warning --text="Content filter unavailable. Firefox will now close." --title="Firefox Guard" &
+                kill $FF_PID
+                echo "$(date +%s)" > "$COOLDOWN_FILE"
+                echo 300 > "$COOLDOWN_DURATION_FILE"
+                touch "$GUARD_KILL_FILE"
+                exit 0
+            elif echo "$RESPONSE" | grep -qi "^\s*YES"; then
                 echo "$(date) | AI FLAGGED: $QUERY" | tee -a "$LOG_FILE"
                 zenity --error --text="AI flagged your search: '$QUERY'. 20 minute cooldown activated." --title="Firefox Guard" &
                 kill $FF_PID
