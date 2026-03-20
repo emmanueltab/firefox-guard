@@ -16,14 +16,18 @@ LOG_FILE="$HOME/.config/firefox-guard/activity.log"
 
 # Redirect stderr to stdout by default
 exec 2>&1
-
 # ============================================================
 # PREVENT MULTIPLE INSTANCES
 # ============================================================
-if pgrep -x "firefox" > /dev/null; then
+LOCK_FILE="/tmp/firefox-guard.lock"
+
+if [ -f "$LOCK_FILE" ]; then
     zenity --error --text="Firefox is already running." --title="Firefox Guard"
     exit 1
 fi
+
+touch "$LOCK_FILE"
+trap "rm -f $LOCK_FILE" EXIT
 
 # ============================================================
 # CHECK COOLDOWN
@@ -173,6 +177,18 @@ fi
                 fi
             done < "$PATTERNS"
         fi
+
+        # Whitelist — skip AI check for known safe queries
+        case "${QUERY,,}" in
+            "google maps"|"google drive"|"google docs"|"google sheets"|"gmail"|"youtube" \
+            |"wikipedia"|"weather"|"houston weather"|"ust"|"cat photos"|"cat"|"cats" \
+            |"dogs"|"dog"|"math"|"homework"|"calculator" \
+            |"bible"|"rosary"|"catholic"|"news"|"sports"|"nasa"|"khan academy" \
+            |"duolingo"|"spotify"|"netflix"|"amazon"|"ebay"|"walmart")
+                echo "$(date) | WHITELISTED: $QUERY" | tee -a "$LOG_FILE"
+                continue
+                ;;
+        esac
 
         # Layer 2 — Groq AI check
         GROQ_KEY=$(cat "$HOME/.config/firefox-guard/groq_api_key.txt" 2>/dev/null)
